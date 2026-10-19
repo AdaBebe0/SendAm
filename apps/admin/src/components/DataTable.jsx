@@ -22,13 +22,30 @@ function compareValues(a, b) {
   return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' });
 }
 
-function sortRows(data, columns, sort) {
-  if (!sort || !data) return data || [];
-  const key = sort.key;
-  const column = columns.find((c) => c.sortable && (c.accessor ?? c.header) === key);
-  if (!column) return data;
-  const factor = sort.direction === 'descending' ? -1 : 1;
-  return [...data].sort((a, b) => factor * compareValues(a[key], b[key]));
+// Sort state is an ordered list of { key, direction }: the first entry is the
+// primary sort and each later entry only breaks ties left by the ones before it.
+function normalizeSort(value) {
+  if (!value) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+const flipDirection = (direction) => (direction === 'ascending' ? 'descending' : 'ascending');
+
+function sortRows(data, columns, sortList) {
+  if (!data) return [];
+  const active = sortList.filter((entry) =>
+    columns.some((c) => c.sortable && (c.accessor ?? c.header) === entry.key)
+  );
+  if (active.length === 0) return data;
+
+  return [...data].sort((a, b) => {
+    for (const { key, direction } of active) {
+      const factor = direction === 'descending' ? -1 : 1;
+      const result = factor * compareValues(a[key], b[key]);
+      if (result !== 0) return result;
+    }
+    return 0;
+  });
 }
 
 export default function DataTable({
@@ -47,7 +64,7 @@ export default function DataTable({
   overscan = 5,
   virtualizeThreshold = 50,
 }) {
-  const [sort, setSort] = useState(defaultSort);
+  const [sort, setSort] = useState(() => normalizeSort(defaultSort));
   const [searchParams, setSearchParams] = useSearchParams();
   const hasActiveFilters =
     filtersActive ??
@@ -56,19 +73,31 @@ export default function DataTable({
   const sortKeyOf = (column) => column.accessor ?? column.header;
   const sortedData = useMemo(() => sortRows(data, columns, sort), [data, columns, sort]);
 
-  const handleSort = (column) => {
+  // Plain click: sort by this column alone, flipping direction if it already
+  // leads the sort. Shift+click: add it as a secondary key, or flip its direction
+  // when it is already part of the sort. Plain clicks clear any secondary keys.
+  const handleSort = (column, event) => {
     const key = sortKeyOf(column);
-    setSort((current) =>
-      current?.key !== key
-        ? { key, direction: 'ascending' }
-        : { key, direction: current.direction === 'ascending' ? 'descending' : 'ascending' }
-    );
+    setSort((current) => {
+      const existing = current.findIndex((entry) => entry.key === key);
+      if (event?.shiftKey) {
+        if (existing === -1) return [...current, { key, direction: 'ascending' }];
+        return current.map((entry, index) =>
+          index === existing ? { key, direction: flipDirection(entry.direction) } : entry
+        );
+      }
+      if (current[0]?.key === key) {
+        return [{ key, direction: flipDirection(current[0].direction) }];
+      }
+      return [{ key, direction: 'ascending' }];
+    });
   };
 
   const ariaSortFor = (column) => {
     if (!column.sortable) return undefined;
-    if (sort?.key !== sortKeyOf(column)) return 'none';
-    return sort.direction === 'descending' ? 'descending' : 'ascending';
+    const entry = sort.find((item) => item.key === sortKeyOf(column));
+    if (!entry) return 'none';
+    return entry.direction === 'descending' ? 'descending' : 'ascending';
   };
 
   const containerRef = useRef(null);
@@ -218,6 +247,41 @@ export default function DataTable({
     }
   };
 
+  const renderSortButton = (col) => {
+    const sortIndex = sort.findIndex((entry) => entry.key === sortKeyOf(col));
+    const entry = sortIndex === -1 ? null : sort[sortIndex];
+    const showPriority = sort.length > 1 && entry !== null;
+    return (
+      <button
+        type="button"
+        onClick={(event) => handleSort(col, event)}
+        title="Click to sort. Shift+click to add a secondary sort."
+        className={`inline-flex items-center gap-1.5 uppercase font-semibold ${FOCUSABLE_HEADER}`}
+      >
+        {col.header}
+        {entry === null ? (
+          <ChevronsUpDown size={14} aria-hidden="true" />
+        ) : entry.direction === 'ascending' ? (
+          <ArrowUp size={14} aria-hidden="true" />
+        ) : (
+          <ArrowDown size={14} aria-hidden="true" />
+        )}
+        {showPriority && (
+          <>
+            <span
+              aria-hidden="true"
+              data-testid="sort-priority-badge"
+              className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-bold leading-none text-white"
+            >
+              {sortIndex + 1}
+            </span>
+            <span className="sr-only">{`, sort priority ${sortIndex + 1}`}</span>
+          </>
+        )}
+      </button>
+    );
+  };
+
   if (!data || data.length === 0) {
     const {
       title = 'No records found.',
@@ -295,22 +359,7 @@ export default function DataTable({
                 className="px-4 sm:px-6 py-4 whitespace-nowrap bg-gray-50 dark:bg-slate-800"
               >
                 {col.sortable ? (
-                  <button
-                    type="button"
-                    onClick={() => handleSort(col)}
-                    className={`inline-flex items-center gap-1.5 uppercase font-semibold ${FOCUSABLE_HEADER}`}
-                  >
-                    {col.header}
-                    {sort?.key === sortKeyOf(col) ? (
-                      sort.direction === 'ascending' ? (
-                        <ArrowUp size={14} aria-hidden="true" />
-                      ) : (
-                        <ArrowDown size={14} aria-hidden="true" />
-                      )
-                    ) : (
-                      <ChevronsUpDown size={14} aria-hidden="true" />
-                    )}
-                  </button>
+                  renderSortButton(col)
                 ) : (
                   col.header
                 )}
